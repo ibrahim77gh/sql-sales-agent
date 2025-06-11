@@ -82,7 +82,6 @@ def check_cookie_login_and_expiry():
             # controller.remove(COOKIE_NAME)
             return None
 
-    print("No valid login found.") # Debug print
     return None
 
 # --- Authentication and Expiration Check ---

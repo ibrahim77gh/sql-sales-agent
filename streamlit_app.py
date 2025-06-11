@@ -131,8 +131,6 @@ def check_cookie_login():
             print(f"Error processing login cookie: {e}") # Debug print
             controller.remove(COOKIE_NAME)
 
-    # If neither session state nor valid cookie worked
-    print("No valid login found.") # Debug print
     return None
 
 
