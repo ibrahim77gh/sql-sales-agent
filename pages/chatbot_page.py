@@ -2,24 +2,76 @@ import time
 import streamlit as st
 import os
 from dotenv import load_dotenv
-
-from langchain.chat_models import init_chat_model
-from langchain_community.utilities import SQLDatabase
-from langchain_community.agent_toolkits import SQLDatabaseToolkit
-from langgraph.prebuilt import create_react_agent
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, BaseMessage
+import sqlite3
+import pandas as pd
 from streamlit_cookies_controller import CookieController
 from dateutil.parser import parse as parse_datetime_string
 import json
 import datetime
+import plotly.express as px
+import plotly.graph_objects as go
 
-from utils import SYSTEM_PROMPT
+from utils import get_database_schema_hash, get_sample_training_data
+go.Figure.show = lambda *args, **kwargs: None
+import hashlib
+import re
+
+# Vanna AI imports
+from vanna.openai import OpenAI_Chat
+from vanna.chromadb import ChromaDB_VectorStore
 
 load_dotenv()
 
 COOKIE_NAME = "login_state"
+SCHEMA_HASH_FILE = "schema_hash.txt"  # File to track schema changes
+
+# Sensitive keywords to block
+SENSITIVE_KEYWORDS = [
+    'schema', 'table', 'column', 'database', 'structure', 'ddl', 'create table',
+    'alter table', 'drop table', 'sqlite_master', 'pragma', 'table_info',
+    'describe', 'show tables', 'show columns', 'information_schema',
+    # The `get_database_schema_hash` function is designed to generate a hash of the current database
+    # schema in order to detect any changes that may have occurred. Here is a breakdown of the steps
+    # it takes:
+    # The `get_database_schema_hash` function is designed to generate a hash of the current database
+    # schema in order to detect any changes that may have occurred. Here is a breakdown of how the
+    # function works:
+    'sys.', 'metadata', 'system', 'admin', 'configuration', 'settings'
+]
 
 controller = CookieController()
+
+def is_sensitive_query(question):
+    """Check if the user question contains sensitive information requests"""
+    question_lower = question.lower()
+    
+    # Check for sensitive keywords
+    for keyword in SENSITIVE_KEYWORDS:
+        if keyword in question_lower:
+            return True
+    
+    # Check for patterns that might be asking about database structure
+    sensitive_patterns = [
+        r'what.*table.*have',
+        r'show.*table',
+        r'list.*table',
+        r'describe.*table',
+        r'what.*column',
+        r'show.*column',
+        r'list.*column',
+        r'database.*structure',
+        r'table.*structure',
+        r'what.*field',
+        r'show.*field',
+        r'list.*field'
+    ]
+    
+    for pattern in sensitive_patterns:
+        if re.search(pattern, question_lower):
+            return True
+    
+    return False
+
 
 def check_cookie_login_and_expiry():
     """Checks for login in session_state or cookie, validates expiry using the .expires timestamp."""
@@ -45,11 +97,9 @@ def check_cookie_login_and_expiry():
                 st.session_state.user_info = user_info
             except (json.JSONDecodeError, ValueError) as e:
                 print(f"Invalid login cookie format: {e}")
-                # controller.remove(COOKIE_NAME)
                 user_info = None # Ensure user_info is None on error
             except Exception as e:
                 print(f"Error processing login cookie: {e}")
-                # controller.remove(COOKIE_NAME)
                 user_info = None # Ensure user_info is None on error
 
     # 3. If user_info was found (either in state or cookie), perform expiry check
@@ -67,22 +117,81 @@ def check_cookie_login_and_expiry():
                     print("Token expired based on timestamp.") # Debug print
                     st.warning("Your session has expired. Please log in again.")
                     st.session_state.user_info = None # Clear expired state
-                    # controller.remove(COOKIE_NAME) # Delete cookie
                     return None # Return None as user is not valid
             except Exception as e:
                 print(f"Error checking token expiry: {e}") # Debug print
                 st.error("Error checking session validity. Please log in again.")
                 st.session_state.user_info = None
-                # controller.remove(COOKIE_NAME)
                 return None
         else:
             print("User info found, but expiry data missing.") # Debug print
             st.warning("Session information incomplete. Please log in again.")
             st.session_state.user_info = None
-            # controller.remove(COOKIE_NAME)
             return None
 
     return None
+
+
+def has_schema_changed():
+    """Check if the database schema has changed since last training."""
+    current_hash, error = get_database_schema_hash()  # Unpack here too
+    
+    if error or current_hash is None:
+        return True  # Assume changed if we can't get hash
+    
+    try:
+        if os.path.exists(SCHEMA_HASH_FILE):
+            with open(SCHEMA_HASH_FILE, 'r') as f:
+                stored_hash = f.read().strip()
+            return current_hash != stored_hash
+        else:
+            return True
+    except Exception:
+        return True
+
+
+def save_schema_hash():
+    """Save the current schema hash."""
+    current_hash, error = get_database_schema_hash()  # Unpack the tuple
+    
+    if error:
+        print(f"Error getting schema hash: {error}")
+        return
+        
+    if current_hash:
+        try:
+            with open(SCHEMA_HASH_FILE, 'w') as f:
+                f.write(current_hash)  # Now writing just the hash string
+        except Exception as e:
+            print(f"Error saving schema hash: {e}")
+
+
+def clear_vector_database(vn):
+    """Clear all existing training data from the vector database."""
+    try:
+        # Get all training data
+        training_data = vn.get_training_data()
+        print(f"Found {len(training_data)} training items to clear")
+        
+        # Remove each training item - Fix: Check if training_data is a list of dicts
+        if isinstance(training_data, list):
+            for item in training_data:
+                if isinstance(item, dict) and 'id' in item:
+                    try:
+                        vn.remove_training_data(id=item['id'])
+                    except Exception as e:
+                        print(f"Error removing training item {item.get('id', 'unknown')}: {e}")
+                elif hasattr(item, 'id'):  # Handle if it's an object with id attribute
+                    try:
+                        vn.remove_training_data(id=item.id)
+                    except Exception as e:
+                        print(f"Error removing training item {getattr(item, 'id', 'unknown')}: {e}")
+        
+        print("Vector database cleared successfully")
+        return True
+    except Exception as e:
+        print(f"Error clearing vector database: {e}")
+        return False
 
 # --- Authentication and Expiration Check ---
 logged_in_user_info = check_cookie_login_and_expiry()
@@ -94,34 +203,140 @@ if logged_in_user_info is None:
     st.switch_page("streamlit_app.py") # Redirect to login page
     st.stop() # Stop execution of the rest of this page
 
+# Vanna AI Custom Class
+class MyVanna(ChromaDB_VectorStore, OpenAI_Chat):
+    def __init__(self, config=None):
+        ChromaDB_VectorStore.__init__(self, config=config)
+        OpenAI_Chat.__init__(self, config=config)
+
+
 @st.cache_resource
 def setup_agent():
-    """Sets up the LLM, DB connection, and agent."""
+    """Sets up the Vanna AI agent with MSSQL database."""
     try:
-        # Using a placeholder model name, replace if needed
-        llm = init_chat_model(model="openai:gpt-4o-mini") # Example model
-        db_uri = os.getenv('DB_URI')
-        if not db_uri:
-             return None, "DB_URI environment variable not set. Cannot connect to database."
+        # Get OpenAI API key
+        openai_api_key = os.getenv('OPENAI_API_KEY')
+        if not openai_api_key:
+            return None, "OPENAI_API_KEY environment variable not set."
+        
+        # Check if schema has changed
+        schema_changed = has_schema_changed()
+        
+        # Initialize Vanna with OpenAI and ChromaDB
+        vn = MyVanna(config={
+            'api_key': openai_api_key,
+            'model': 'gpt-4o'  # Using the same model as before
+        })
+        
+        # Connect to MSSQL database
+        vn.connect_to_mssql(odbc_conn_str=os.getenv('DB_URI_VANNA'))
+        
+        # Check if we need to train or retrain the model
+        training_data = vn.get_training_data()
+        print(f"Found {len(training_data)} training items in the vector database")
+        needs_training = len(training_data) == 0 or schema_changed
+        
+        if needs_training:
+            if schema_changed:
+                st.info("Database schema has changed. Clearing old training data and retraining Vanna AI...")
+                # Clear existing training data
+                clear_vector_database(vn)
+            else:
+                st.info("Training Vanna AI on your database schema and sample queries... This may take a moment.")
+            
+            # Train Vanna on DDL statements
+            try:
+                df_tables = vn.run_sql("""
+                    SELECT TABLE_NAME
+                    FROM INFORMATION_SCHEMA.TABLES
+                    WHERE TABLE_TYPE = 'BASE TABLE'
+                """)
 
-        db = SQLDatabase.from_uri(db_uri)
-        toolkit = SQLDatabaseToolkit(db=db, llm=llm)
-        tools = toolkit.get_tools()
-        system_prompt = SYSTEM_PROMPT.format(
-            dialect=db.dialect,
-            top_k=5,
-        )
-        # Assuming create_react_agent takes prompt directly now
-        agent = create_react_agent(
-            llm,
-            tools,
-            prompt=system_prompt,
-        )
-        return agent, None
+                # Get column definitions
+                df_columns = vn.run_sql("""
+                    SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE
+                    FROM INFORMATION_SCHEMA.COLUMNS
+                    ORDER BY TABLE_NAME, ORDINAL_POSITION
+                """)
+
+                # Create DDL from metadata
+                for table in df_tables['TABLE_NAME'].to_list():
+                    df_table_cols = df_columns[df_columns['TABLE_NAME'] == table]
+                    ddl = f"CREATE TABLE {table} (\n"
+                    ddl += ",\n".join([
+                        f"  {row['COLUMN_NAME']} {row['DATA_TYPE'].upper()}"
+                        + (" NULL" if row["IS_NULLABLE"] == "YES" else " NOT NULL")
+                        for _, row in df_table_cols.iterrows()
+                    ])
+                    ddl += "\n);"
+                    vn.train(ddl=ddl)
+                
+                # Add MSSQL-specific documentation
+                vn.train(documentation="""
+                This is a Microsoft SQL Server (MSSQL) sales database containing customer transaction data.
+
+                CRITICAL SYNTAX REQUIREMENTS:
+                - This is Microsoft SQL Server, NOT SQLite or any other database
+                - NEVER use SQLite functions like strftime(), datetime(), etc.
+                - Use MSSQL syntax exclusively
+
+                DATE FUNCTIONS (MSSQL ONLY):
+                - Use YEAR([column]) to extract year
+                - Use MONTH([column]) to extract month  
+                - Use DAY([column]) to extract day
+                - Use DATEPART(quarter, [column]) for quarters
+                - Use GETDATE() for current date/time
+                - Use DATEADD(interval, number, date) for date arithmetic
+                - Use BETWEEN for date ranges
+
+                QUERY SYNTAX:
+                - Use TOP N instead of LIMIT N
+                - Use square brackets [column_name] for column names with spaces
+                - Use proper MSSQL aggregate functions
+
+                DATABASE CONTENT:
+                - Main table: ConsolidateData_PBI
+                - Sales transactions with dates, amounts, profit
+                - Customer regions and company information
+                - Product categories and sales metrics
+                - All column names are cleaned (no leading/trailing spaces)
+
+                EXAMPLES OF CORRECT MSSQL SYNTAX:
+                - Monthly filter: WHERE YEAR([From_Date]) = 2025 AND MONTH([From_Date]) = 6
+                - Top results: SELECT TOP 10 * FROM ConsolidateData_PBI
+                - Current month: WHERE YEAR([From_Date]) = YEAR(GETDATE()) AND MONTH([From_Date]) = MONTH(GETDATE())
+                """)
+                
+                # Add specific MSSQL syntax examples
+                vn.train(question="How to filter by month in MSSQL?", 
+                        sql="SELECT * FROM ConsolidateData_PBI WHERE YEAR([From_Date]) = 2025 AND MONTH([From_Date]) = 6")
+                
+                vn.train(question="How to get current date in MSSQL?", 
+                        sql="SELECT GETDATE() as current_date")
+                
+                vn.train(question="How to get top records in MSSQL?", 
+                        sql="SELECT TOP 10 * FROM ConsolidateData_PBI ORDER BY [Total Sales] DESC")
+                
+                # Train with sample question-SQL pairs
+                sample_data = get_sample_training_data()
+                for item in sample_data:
+                    vn.train(question=item["question"], sql=item["sql"])
+                
+                # Save the current schema hash
+                save_schema_hash()
+                
+                st.success("AI training completed!")
+            except Exception as train_error:
+                print(f"Training error: {train_error}")
+                # Continue even if training fails
+        
+        return vn, None
+        
     except Exception as e:
-        return None, f"Error setting up the agent or database connection: {e}"
+        return None, f"Error setting up Vanna AI agent: {e}"
 
-agent, agent_setup_error = setup_agent()
+# Initialize the Vanna agent
+vanna_agent, agent_setup_error = setup_agent()
 
 # --- Streamlit UI (Chatbot) ---
 
@@ -141,15 +356,31 @@ if st.sidebar.button("Logout"):
 st.write("Ask me something about the sales data:")
 
 # Initialize chat history for this page
-# This should be initialized *after* the auth check
 if "messages" not in st.session_state:
     st.session_state.messages = []
-
 
 # Display chat messages from history on app rerun
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+        if message["role"] == "assistant":
+            # Display the main response
+            st.markdown(message["content"])
+            
+            # Display Vanna-generated chart if it exists
+            if "vanna_chart" in message:
+                st.plotly_chart(message["vanna_chart"], use_container_width=True)
+                
+            # Display data table if it exists
+            if "dataframe" in message and not message["dataframe"].empty:
+                st.write("📊 **Results:**")
+                st.dataframe(message["dataframe"])
+            
+            # Display SQL query in expander if it exists
+            if "sql_query" in message and message["sql_query"]:
+                with st.expander("📝 View Generated SQL Query"):
+                    st.code(message["sql_query"], language='sql')
+        else:
+            st.markdown(message["content"])
 
 # Chat input
 if prompt := st.chat_input("Ask me something about the sales data..."):
@@ -159,90 +390,241 @@ if prompt := st.chat_input("Ask me something about the sales data..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Check if agent setup was successful before attempting to use it
-    if agent_setup_error:
-        st.warning("Agent is not available due to setup error.")
-        # Add error message to chat history
-        st.session_state.messages.append({"role": "assistant", "content": "Agent is not available due to setup error. Please fix the configuration."})
-    elif agent:
+    # Check for sensitive queries first
+    if is_sensitive_query(prompt):
+        sensitive_response = "I don't have access to that type of information. Please ask questions about your sales data, such as sales trends, product performance, customer analysis, or revenue metrics."
+        
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                MAX_HISTORY_TO_SEND = 2
-                recent_messages_to_send = st.session_state.messages[-MAX_HISTORY_TO_SEND:]
-                # Prepare messages for the agent
-                agent_input_messages = [
-                    (HumanMessage(content=msg["content"]) if msg["role"] == "user" else AIMessage(content=msg["content"]))
-                    for msg in recent_messages_to_send
-                ]
-
-                final_answer_text = ""
-                intermediate_steps_text = ""
-                message_placeholder = st.empty() # Placeholder for streaming the assistant's final answer
-
-                # Stream the agent's response
+            st.write(sensitive_response)
+        
+        st.session_state.messages.append({"role": "assistant", "content": sensitive_response})
+    
+    # Check if agent setup was successful before attempting to use it
+    elif agent_setup_error:
+        st.warning("Vanna AI agent is not available due to setup error.")
+        error_msg = f"Agent is not available due to setup error: {agent_setup_error}"
+        st.session_state.messages.append({"role": "assistant", "content": error_msg})
+    elif vanna_agent:
+        with st.chat_message("assistant"):
+            with st.spinner("Analyzing your question and generating response..."):
                 try:
-                    # agent.stream yields steps, each containing the current state's messages
-                    # The last message in the step is usually the most recent one (tool call, observation, or final answer)
-                    for step in agent.stream({"messages": agent_input_messages}, stream_mode="values"):
-                        last_message: BaseMessage = step["messages"][-1]
+                    # Use Vanna AI's built-in ask method which handles everything
+                    # This returns SQL, DataFrame, chart, and explanation
+                    result = vanna_agent.ask(prompt)
+                    
+                    # Vanna's ask method can return different types of results
+                    # Let's handle them appropriately
+                    if result is not None:
+                        # Try to get the SQL query that was generated
+                        try:
+                            sql_query = vanna_agent.generate_sql(prompt)
+                        except:
+                            sql_query = None
+                        
+                        # Try to get the data
+                        try:
+                            if sql_query:
+                                result_df = vanna_agent.run_sql(sql_query)
+                            else:
+                                result_df = pd.DataFrame()
+                        except:
+                            result_df = pd.DataFrame()
+                        
+                        # Try to get Vanna's generated chart
+                        try:
+                            # Vanna can generate charts automatically with get_plotly_figure
+                            if not result_df.empty and sql_query:
+                                vanna_chart = vanna_agent.get_plotly_figure(
+                                    plotly_code=vanna_agent.generate_plotly_code(
+                                        question=prompt,
+                                        sql=sql_query,
+                                        df=result_df
+                                    ),
+                                    df=result_df
+                                )
+                            else:
+                                vanna_chart = None
+                        except Exception as chart_error:
+                            print(f"Chart generation error: {chart_error}")
+                            vanna_chart = None
+                        
+                        # Generate a natural language response
+                        if isinstance(result, str):
+                            # If Vanna returned a string response, use it
+                            answer = result
+                        elif not result_df.empty:
+                            # Generate response based on data
+                            answer = f"I found {len(result_df)} result(s) for your query. "
+                            
+                            # Add specific insights based on the data
+                            if len(result_df) == 1 and len(result_df.columns) >= 1:
+                                # Single result - be specific
+                                first_col = result_df.columns[0]
+                                value = result_df.iloc[0][first_col]
+                                if pd.api.types.is_numeric_dtype(result_df[first_col]):
+                                    if isinstance(value, float):
+                                        answer = f"The result is: {value:,.2f}"
+                                    else:
+                                        answer = f"The result is: {value:,}"
+                                else:
+                                    answer = f"The result is: {value}"
+                            
+                            elif len(result_df) <= 10:
+                                # Small dataset - provide summary
+                                numeric_cols = result_df.select_dtypes(include=['number']).columns.tolist()
+                                if numeric_cols:
+                                    total = result_df[numeric_cols[0]].sum()
+                                    answer += f"The total for {numeric_cols[0]} is {total:,.2f}."
+                        else:
+                            answer = "No results were found for your query. The data might not contain information matching your request."
 
-                        # Capture ToolMessage output (this is the raw query result string)
-                        if isinstance(last_message, ToolMessage) and last_message.name == 'sql_db_query':
-                             # Attempt to get the actual query from tool_calls
-                            query_to_show = "N/A (could not extract query)"
-                            if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
-                                try:
-                                    tool_call = last_message.tool_calls[0]
-                                    if tool_call.type == 'tool_call' and tool_call.function:
-                                        if tool_call.function.args:
-                                            query_to_show = tool_call.function.args.get('query', 'N/A (query key not found)')
-                                        else:
-                                            query_to_show = 'N/A (no args found)'
-                                except Exception as ex:
-                                    query_to_show = f"Error extracting query: {ex}"
-                                    pass # Fallback
+                        # Display answer
+                        st.write(answer)
+                        
+                        # Display Vanna-generated chart if available
+                        chart_to_store = None
+                        if vanna_chart:
+                            st.plotly_chart(vanna_chart, use_container_width=True)
+                            chart_to_store = vanna_chart
+                        
+                        # Display data table if available
+                        if not result_df.empty:
+                            st.write("📊 **Results:**")
+                            st.dataframe(result_df)
 
-                            intermediate_steps_text += f"\nTool: sql_db_query\nQuery: ```sql\n{query_to_show}\n```\n"
-                            intermediate_steps_text += f"Observation:\n```\n{last_message.content}\n```\n"
+                        # Display SQL in expander
+                        if sql_query:
+                            with st.expander("📝 View Generated SQL Query"):
+                                st.code(sql_query, language='sql')
 
+                        # ✅ Generate follow-up questions
+                        follow_up_questions = []
+                        if sql_query and not result_df.empty:
+                            follow_up_questions = vanna_agent.generate_followup_questions(prompt, sql_query, result_df)
 
-                        # Capture the final AIMessage (this is the synthesized answer)
-                        if isinstance(last_message, AIMessage):
-                            # Append content for streaming effect if desired
-                            # For simplicity here, we just capture the final content
-                            final_answer_text = last_message.content
-                            # Optionally update placeholder here for typing effect
-                            message_placeholder.markdown(final_answer_text + "▌")
-
-
-                    # After the stream finishes, display the final result
-                    message_placeholder.markdown(final_answer_text)
-
-                    # Optional: Display intermediate steps/thoughts
-                    if intermediate_steps_text:
-                        with st.expander("Show thinking process"):
-                            st.text(intermediate_steps_text) # Use st.text for raw tool output/steps
-
-                    # Store the final assistant message in history
-                    st.session_state.messages.append({"role": "assistant", "content": final_answer_text})
+                        # ✅ Display follow-up questions as buttons (at the end)
+                        if follow_up_questions:
+                            st.markdown("**🤖 You could also ask:**")
+                            for q in follow_up_questions:
+                                st.markdown(f"- {q}")
+                                    
+                        
+                        # Store the response in chat history
+                        message_data = {
+                            "role": "assistant", 
+                            "content": answer,
+                            "sql_query": sql_query,
+                            "dataframe": result_df if not result_df.empty else pd.DataFrame(),
+                            "follow_up_questions": follow_up_questions
+                        }
+                        
+                        if chart_to_store:
+                            message_data["vanna_chart"] = chart_to_store
+                        
+                        st.session_state.messages.append(message_data)
+                    
+                    else:
+                        error_message = "I couldn't generate a response for your question. Please try rephrasing your question or ask about sales data, products, customers, or time-based analysis."
+                        st.write(error_message)
+                        st.session_state.messages.append({"role": "assistant", "content": error_message})
 
                 except Exception as e:
-                    error_message = f"An error occurred while processing your request: {e}"
+                    # Check if this is a sensitive query that slipped through
+                    print(f"Error processing question: {e}")
+                    if any(keyword in str(e).lower() for keyword in ['schema', 'table', 'sqlite_master']):
+                        error_message = "I don't have access to that type of information. Please ask questions about your sales data instead."
+                    else:
+                        error_message = f"An error occurred while processing your request. Please try rephrasing your question."
+                    
                     st.error(error_message)
                     # Add error message to chat history
                     st.session_state.messages.append({"role": "assistant", "content": error_message})
+    else:
+        st.error("Vanna AI agent is not initialized.")
 
-
+# Sidebar information
 st.sidebar.info("""
-**How it works:**
-1. You logged in successfully on the previous page.
-2. This page checks your login status.
-3. The SQL agent is set up (once per app instance).
-4. Your question goes to the agent.
-5. The agent decides on a SQL query.
-6. It runs the query using the `sql_db_query` tool (steps visible in "Show thinking process").
-7. The agent synthesizes a final answer based on the result.
-8. The app displays the agent's final synthesized answer.
+**How SQL Agent works:**
+1. **Training**: SQL Agent learns your database schema automatically
+2. **Question Processing**: Your natural language question is analyzed
+3. **SQL Generation**: AI generates appropriate SQL queries
+4. **Execution**: Query runs on your SQLite database
+5. **Results**: Data is returned with explanations and visualizations
+
+**Sample Questions:**
+- What is the total sales for June 2025?
+- Show me average ticket sale by region and its total gross earning in May
+- What is the sales count and gross earning by region and status show its trend.
+- What is the gross margin of june?
+- Show me sales trends over time
+
+**Powered by:**
+- OpenAI GPT-4o
+- ChromaDB Vector Store
+- Generative AI RAG Framework
 """)
 
-# Removed the built-in auth docs as they are not relevant to this custom implementation.
+# Add training data management in sidebar
+if vanna_agent and st.sidebar.button("🔄 Force Retrain Model"):
+    with st.spinner("Retraining Vanna AI..."):
+        try:
+            # Clear existing training data
+            clear_vector_database(vanna_agent)
+
+            # Fetch schema info from MSSQL
+            df_tables = vanna_agent.run_sql("""
+                SELECT TABLE_NAME
+                FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_TYPE = 'BASE TABLE'
+            """)
+            
+            df_columns = vanna_agent.run_sql("""
+                SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE
+                FROM INFORMATION_SCHEMA.COLUMNS
+                ORDER BY TABLE_NAME, ORDINAL_POSITION
+            """)
+
+            # Generate and train DDL statements
+            for table in df_tables['TABLE_NAME'].to_list():
+                df_table_cols = df_columns[df_columns['TABLE_NAME'] == table]
+                ddl = f"CREATE TABLE {table} (\n"
+                ddl += ",\n".join([
+                    f"  {row['COLUMN_NAME']} {row['DATA_TYPE'].upper()}"
+                    + (" NULL" if row["IS_NULLABLE"] == "YES" else " NOT NULL")
+                    for _, row in df_table_cols.iterrows()
+                ])
+                ddl += "\n);"
+                vanna_agent.train(ddl=ddl)
+
+            # Add business documentation
+            vanna_agent.train(documentation="""
+            This is a sales database containing customer transaction data with cleaned column names.
+            All column names have had leading/trailing whitespace removed for consistency.
+            """)
+
+            # Retrain with sample data
+            sample_data = get_sample_training_data()
+            for item in sample_data:
+                vanna_agent.train(question=item["question"], sql=item["sql"])
+
+            # Update schema hash
+            save_schema_hash()
+
+            st.sidebar.success("Model retrained successfully!")
+        except Exception as e:
+            st.sidebar.error(f"Retraining failed: {e}")
+
+
+# Show current training data count and schema status
+if vanna_agent:
+    try:
+        training_count = len(vanna_agent.get_training_data())
+        st.sidebar.write(f"📚 Training data items: {training_count}")
+        
+        # Show schema status
+        if has_schema_changed():
+            st.sidebar.warning("⚠️ Schema may have changed")
+        else:
+            st.sidebar.success("✅ Schema is up to date")
+    except:
+        st.sidebar.write("📚 Training data: Unknown")
