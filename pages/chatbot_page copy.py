@@ -3,6 +3,7 @@ import streamlit as st
 import os
 from dotenv import load_dotenv
 import sqlite3
+from langchain_community.utilities import SQLDatabase
 import pandas as pd
 from streamlit_cookies_controller import CookieController
 from dateutil.parser import parse as parse_datetime_string
@@ -11,7 +12,7 @@ import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 
-from utils import get_database_schema_hash, get_sample_training_data
+from utils import get_database_schema_hash
 go.Figure.show = lambda *args, **kwargs: None
 import hashlib
 import re
@@ -30,12 +31,6 @@ SENSITIVE_KEYWORDS = [
     'schema', 'table', 'column', 'database', 'structure', 'ddl', 'create table',
     'alter table', 'drop table', 'sqlite_master', 'pragma', 'table_info',
     'describe', 'show tables', 'show columns', 'information_schema',
-    # The `get_database_schema_hash` function is designed to generate a hash of the current database
-    # schema in order to detect any changes that may have occurred. Here is a breakdown of the steps
-    # it takes:
-    # The `get_database_schema_hash` function is designed to generate a hash of the current database
-    # schema in order to detect any changes that may have occurred. Here is a breakdown of how the
-    # function works:
     'sys.', 'metadata', 'system', 'admin', 'configuration', 'settings'
 ]
 
@@ -71,7 +66,6 @@ def is_sensitive_query(question):
             return True
     
     return False
-
 
 def check_cookie_login_and_expiry():
     """Checks for login in session_state or cookie, validates expiry using the .expires timestamp."""
@@ -131,40 +125,33 @@ def check_cookie_login_and_expiry():
 
     return None
 
-
-def has_schema_changed():
+def has_schema_changed(db_path):
     """Check if the database schema has changed since last training."""
-    current_hash, error = get_database_schema_hash()  # Unpack here too
+    current_hash = get_database_schema_hash(db_path)
     
-    if error or current_hash is None:
+    if current_hash is None:
         return True  # Assume changed if we can't get hash
     
     try:
+        # Try to read the stored hash
         if os.path.exists(SCHEMA_HASH_FILE):
             with open(SCHEMA_HASH_FILE, 'r') as f:
                 stored_hash = f.read().strip()
             return current_hash != stored_hash
         else:
-            return True
+            return True  # No stored hash means first time
     except Exception:
-        return True
+        return True  # Assume changed if we can't read stored hash
 
-
-def save_schema_hash():
+def save_schema_hash(db_path):
     """Save the current schema hash."""
-    current_hash, error = get_database_schema_hash()  # Unpack the tuple
-    
-    if error:
-        print(f"Error getting schema hash: {error}")
-        return
-        
+    current_hash = get_database_schema_hash(db_path)
     if current_hash:
         try:
             with open(SCHEMA_HASH_FILE, 'w') as f:
-                f.write(current_hash)  # Now writing just the hash string
+                f.write(current_hash)
         except Exception as e:
             print(f"Error saving schema hash: {e}")
-
 
 def clear_vector_database(vn):
     """Clear all existing training data from the vector database."""
@@ -173,19 +160,13 @@ def clear_vector_database(vn):
         training_data = vn.get_training_data()
         print(f"Found {len(training_data)} training items to clear")
         
-        # Remove each training item - Fix: Check if training_data is a list of dicts
-        if isinstance(training_data, list):
-            for item in training_data:
-                if isinstance(item, dict) and 'id' in item:
-                    try:
-                        vn.remove_training_data(id=item['id'])
-                    except Exception as e:
-                        print(f"Error removing training item {item.get('id', 'unknown')}: {e}")
-                elif hasattr(item, 'id'):  # Handle if it's an object with id attribute
-                    try:
-                        vn.remove_training_data(id=item.id)
-                    except Exception as e:
-                        print(f"Error removing training item {getattr(item, 'id', 'unknown')}: {e}")
+        # Remove each training item
+        for item in training_data:
+            if 'id' in item:
+                try:
+                    vn.remove_training_data(id=item['id'])
+                except Exception as e:
+                    print(f"Error removing training item {item['id']}: {e}")
         
         print("Vector database cleared successfully")
         return True
@@ -209,27 +190,42 @@ class MyVanna(ChromaDB_VectorStore, OpenAI_Chat):
         ChromaDB_VectorStore.__init__(self, config=config)
         OpenAI_Chat.__init__(self, config=config)
 
+def get_sample_training_data():
+    """Returns sample training data for sales database with cleaned column names"""
+    return [
+      {
+        'question': 'What is the total total sales for May 2025?',
+        'sql': "SELECT SUM([Total Sales]) AS total_total_sales FROM sales WHERE strftime('%Y-%m', [From_Date]) = '2025-05'"
+    }]
 
 @st.cache_resource
 def setup_agent():
-    """Sets up the Vanna AI agent with MSSQL database."""
+    """Sets up the Vanna AI agent with SQL Server database."""
     try:
         # Get OpenAI API key
         openai_api_key = os.getenv('OPENAI_API_KEY')
         if not openai_api_key:
             return None, "OPENAI_API_KEY environment variable not set."
         
-        # Check if schema has changed
-        schema_changed = has_schema_changed()
+        # Get database URI
+        db_uri = os.getenv('DB_URI')
+        if not db_uri:
+            return None, "DB_URI environment variable not set."
+        
+        # Check if schema has changed (pass None since we're not using SQLite file path)
+        schema_changed = has_schema_changed(db_path=None)
         
         # Initialize Vanna with OpenAI and ChromaDB
         vn = MyVanna(config={
             'api_key': openai_api_key,
-            'model': 'gpt-4o'  # Using the same model as before
+            'model': 'gpt-4o'
         })
         
-        # Connect to SQLite database
-        vn.connect_to_mssql(odbc_conn_str=os.getenv('DB_URI_VANNA'))
+        # Connect to SQL Server using the URI
+        # Use connect_to_mssql for SQL Server
+        vn.connect_to_mssql(
+            odbc_conn_str=db_uri
+        )
         
         # Check if we need to train or retrain the model
         training_data = vn.get_training_data()
@@ -238,38 +234,43 @@ def setup_agent():
         if needs_training:
             if schema_changed:
                 st.info("Database schema has changed. Clearing old training data and retraining Vanna AI...")
-                # Clear existing training data
                 clear_vector_database(vn)
             else:
                 st.info("Training Vanna AI on your database schema and sample queries... This may take a moment.")
             
-            # Train Vanna on DDL statements
+            # Train Vanna on DDL statements - SQL Server version
             try:
-                df_tables = vn.run_sql("""
-                    SELECT TABLE_NAME
-                    FROM INFORMATION_SCHEMA.TABLES
-                    WHERE TABLE_TYPE = 'BASE TABLE'
+                # Get table schemas for SQL Server
+                df_ddl = vn.run_sql("""
+                    SELECT 
+                        'CREATE TABLE ' + TABLE_SCHEMA + '.' + TABLE_NAME + ' (' +
+                        STRING_AGG(
+                            COLUMN_NAME + ' ' + DATA_TYPE + 
+                            CASE 
+                                WHEN CHARACTER_MAXIMUM_LENGTH IS NOT NULL 
+                                THEN '(' + CAST(CHARACTER_MAXIMUM_LENGTH AS VARCHAR) + ')'
+                                WHEN NUMERIC_PRECISION IS NOT NULL 
+                                THEN '(' + CAST(NUMERIC_PRECISION AS VARCHAR) + 
+                                     CASE WHEN NUMERIC_SCALE IS NOT NULL 
+                                     THEN ',' + CAST(NUMERIC_SCALE AS VARCHAR) ELSE '' END + ')'
+                                ELSE ''
+                            END +
+                            CASE WHEN IS_NULLABLE = 'NO' THEN ' NOT NULL' ELSE '' END,
+                            ', '
+                        ) WITHIN GROUP (ORDER BY ORDINAL_POSITION) + ')' as ddl_statement
+                    FROM INFORMATION_SCHEMA.COLUMNS 
+                    WHERE TABLE_NAME IN (
+                        SELECT TABLE_NAME 
+                        FROM INFORMATION_SCHEMA.TABLES 
+                        WHERE TABLE_TYPE = 'BASE TABLE'
+                        AND TABLE_SCHEMA NOT IN ('sys', 'INFORMATION_SCHEMA')
+                    )
+                    GROUP BY TABLE_SCHEMA, TABLE_NAME
                 """)
-
-                # Optionally, get column definitions
-                df_columns = vn.run_sql("""
-                    SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE
-                    FROM INFORMATION_SCHEMA.COLUMNS
-                    ORDER BY TABLE_NAME, ORDINAL_POSITION
-                """)
-
-                # Optionally: create mock DDL from metadata
-                for table in df_tables['TABLE_NAME'].to_list():
-                    df_table_cols = df_columns[df_columns['TABLE_NAME'] == table]
-                    ddl = f"CREATE TABLE {table} (\n"
-                    ddl += ",\n".join([
-                        f"  {row['COLUMN_NAME']} {row['DATA_TYPE'].upper()}"
-                        + (" NULL" if row["IS_NULLABLE"] == "YES" else " NOT NULL")
-                        for _, row in df_table_cols.iterrows()
-                    ])
-                    ddl += "\n);"
+                
+                for ddl in df_ddl['ddl_statement'].to_list():
                     vn.train(ddl=ddl)
-                                
+                
                 # Add business documentation
                 vn.train(documentation="""
                 This is a sales database containing customer transaction data with the following key information:
@@ -280,16 +281,16 @@ def setup_agent():
                 - Gross margin calculations
                 - Regional and categorical breakdowns available
                 
-                Important: All column names have been cleaned and whitespace has been removed.
+                This is a SQL Server database with properly formatted column names.
                 """)
                 
-                # Train with sample question-SQL pairs
+                # Train with sample question-SQL pairs (updated for SQL Server)
                 sample_data = get_sample_training_data()
                 for item in sample_data:
                     vn.train(question=item["question"], sql=item["sql"])
                 
                 # Save the current schema hash
-                save_schema_hash()
+                save_schema_hash(db_path=None)
                 
                 st.success("Vanna AI training completed with updated schema!")
             except Exception as train_error:
@@ -526,50 +527,30 @@ if vanna_agent and st.sidebar.button("🔄 Force Retrain Model"):
         try:
             # Clear existing training data
             clear_vector_database(vanna_agent)
-
-            # Fetch schema info from MSSQL
-            df_tables = vanna_agent.run_sql("""
-                SELECT TABLE_NAME
-                FROM INFORMATION_SCHEMA.TABLES
-                WHERE TABLE_TYPE = 'BASE TABLE'
-            """)
             
-            df_columns = vanna_agent.run_sql("""
-                SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE
-                FROM INFORMATION_SCHEMA.COLUMNS
-                ORDER BY TABLE_NAME, ORDINAL_POSITION
-            """)
-
-            # Generate and train DDL statements
-            for table in df_tables['TABLE_NAME'].to_list():
-                df_table_cols = df_columns[df_columns['TABLE_NAME'] == table]
-                ddl = f"CREATE TABLE {table} (\n"
-                ddl += ",\n".join([
-                    f"  {row['COLUMN_NAME']} {row['DATA_TYPE'].upper()}"
-                    + (" NULL" if row["IS_NULLABLE"] == "YES" else " NOT NULL")
-                    for _, row in df_table_cols.iterrows()
-                ])
-                ddl += "\n);"
+            # Retrain with schemagit 
+            df_ddl = vanna_agent.run_sql("SELECT type, sql FROM sqlite_master WHERE sql is not null")
+            for ddl in df_ddl['sql'].to_list():
                 vanna_agent.train(ddl=ddl)
-
+            
             # Add business documentation
             vanna_agent.train(documentation="""
             This is a sales database containing customer transaction data with cleaned column names.
             All column names have had leading/trailing whitespace removed for consistency.
             """)
-
+            
             # Retrain with sample data
             sample_data = get_sample_training_data()
             for item in sample_data:
                 vanna_agent.train(question=item["question"], sql=item["sql"])
-
+            
             # Update schema hash
-            save_schema_hash()
-
+            db_path = os.getenv('DB_URI', '').replace('sqlite:///', '')
+            save_schema_hash(db_path)
+            
             st.sidebar.success("Model retrained successfully!")
         except Exception as e:
             st.sidebar.error(f"Retraining failed: {e}")
-
 
 # Show current training data count and schema status
 if vanna_agent:
@@ -578,7 +559,8 @@ if vanna_agent:
         st.sidebar.write(f"📚 Training data items: {training_count}")
         
         # Show schema status
-        if has_schema_changed():
+        db_path = os.getenv('DB_URI', '').replace('sqlite:///', '')
+        if has_schema_changed(db_path):
             st.sidebar.warning("⚠️ Schema may have changed")
         else:
             st.sidebar.success("✅ Schema is up to date")
