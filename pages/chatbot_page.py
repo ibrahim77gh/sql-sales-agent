@@ -194,14 +194,14 @@ def clear_vector_database(vn):
         return False
 
 # --- Authentication and Expiration Check ---
-# logged_in_user_info = check_cookie_login_and_expiry()
+logged_in_user_info = check_cookie_login_and_expiry()
 
-# if logged_in_user_info is None:
-#     print("Redirecting to login page.") # Debug print
-#     st.session_state.user_info = None # Ensure state is clear
-#     st.session_state.messages = [] # Clear chat history
-#     st.switch_page("streamlit_app.py") # Redirect to login page
-#     st.stop() # Stop execution of the rest of this page
+if logged_in_user_info is None:
+    print("Redirecting to login page.") # Debug print
+    st.session_state.user_info = None # Ensure state is clear
+    st.session_state.messages = [] # Clear chat history
+    st.switch_page("streamlit_app.py") # Redirect to login page
+    st.stop() # Stop execution of the rest of this page
 
 # Vanna AI Custom Class
 class MyVanna(ChromaDB_VectorStore, OpenAI_Chat):
@@ -343,8 +343,8 @@ vanna_agent, agent_setup_error = setup_agent()
 st.title("SQL Database Chatbot")
 
 # Display logged-in user info and Logout button in sidebar
-# user_name = st.session_state.user_info.get("Name", "User")
-# st.sidebar.write(f"Logged in as: **{user_name}**")
+user_name = st.session_state.user_info.get("Name", "User")
+st.sidebar.write(f"Logged in as: **{user_name}**")
 
 # Logout button
 if st.sidebar.button("Logout"):
