@@ -228,11 +228,12 @@ def setup_agent():
             'model': 'gpt-4o'  # Using the same model as before
         })
         
-        # Connect to SQLite database
+        # Connect to MSSQL database
         vn.connect_to_mssql(odbc_conn_str=os.getenv('DB_URI_VANNA'))
         
         # Check if we need to train or retrain the model
         training_data = vn.get_training_data()
+        print(f"Found {len(training_data)} training items in the vector database")
         needs_training = len(training_data) == 0 or schema_changed
         
         if needs_training:
@@ -251,14 +252,14 @@ def setup_agent():
                     WHERE TABLE_TYPE = 'BASE TABLE'
                 """)
 
-                # Optionally, get column definitions
+                # Get column definitions
                 df_columns = vn.run_sql("""
                     SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE
                     FROM INFORMATION_SCHEMA.COLUMNS
                     ORDER BY TABLE_NAME, ORDINAL_POSITION
                 """)
 
-                # Optionally: create mock DDL from metadata
+                # Create DDL from metadata
                 for table in df_tables['TABLE_NAME'].to_list():
                     df_table_cols = df_columns[df_columns['TABLE_NAME'] == table]
                     ddl = f"CREATE TABLE {table} (\n"
@@ -269,19 +270,52 @@ def setup_agent():
                     ])
                     ddl += "\n);"
                     vn.train(ddl=ddl)
-                                
-                # Add business documentation
-                vn.train(documentation="""
-                This is a sales database containing customer transaction data with the following key information:
-                - Sales transactions with dates, amounts, and profit
-                - Customer information and regions
-                - Product categories and names
-                - Time-based analysis capabilities for trends
-                - Gross margin calculations
-                - Regional and categorical breakdowns available
                 
-                Important: All column names have been cleaned and whitespace has been removed.
+                # Add MSSQL-specific documentation
+                vn.train(documentation="""
+                This is a Microsoft SQL Server (MSSQL) sales database containing customer transaction data.
+
+                CRITICAL SYNTAX REQUIREMENTS:
+                - This is Microsoft SQL Server, NOT SQLite or any other database
+                - NEVER use SQLite functions like strftime(), datetime(), etc.
+                - Use MSSQL syntax exclusively
+
+                DATE FUNCTIONS (MSSQL ONLY):
+                - Use YEAR([column]) to extract year
+                - Use MONTH([column]) to extract month  
+                - Use DAY([column]) to extract day
+                - Use DATEPART(quarter, [column]) for quarters
+                - Use GETDATE() for current date/time
+                - Use DATEADD(interval, number, date) for date arithmetic
+                - Use BETWEEN for date ranges
+
+                QUERY SYNTAX:
+                - Use TOP N instead of LIMIT N
+                - Use square brackets [column_name] for column names with spaces
+                - Use proper MSSQL aggregate functions
+
+                DATABASE CONTENT:
+                - Main table: ConsolidateData_PBI
+                - Sales transactions with dates, amounts, profit
+                - Customer regions and company information
+                - Product categories and sales metrics
+                - All column names are cleaned (no leading/trailing spaces)
+
+                EXAMPLES OF CORRECT MSSQL SYNTAX:
+                - Monthly filter: WHERE YEAR([From_Date]) = 2025 AND MONTH([From_Date]) = 6
+                - Top results: SELECT TOP 10 * FROM ConsolidateData_PBI
+                - Current month: WHERE YEAR([From_Date]) = YEAR(GETDATE()) AND MONTH([From_Date]) = MONTH(GETDATE())
                 """)
+                
+                # Add specific MSSQL syntax examples
+                vn.train(question="How to filter by month in MSSQL?", 
+                        sql="SELECT * FROM ConsolidateData_PBI WHERE YEAR([From_Date]) = 2025 AND MONTH([From_Date]) = 6")
+                
+                vn.train(question="How to get current date in MSSQL?", 
+                        sql="SELECT GETDATE() as current_date")
+                
+                vn.train(question="How to get top records in MSSQL?", 
+                        sql="SELECT TOP 10 * FROM ConsolidateData_PBI ORDER BY [Total Sales] DESC")
                 
                 # Train with sample question-SQL pairs
                 sample_data = get_sample_training_data()
@@ -291,10 +325,10 @@ def setup_agent():
                 # Save the current schema hash
                 save_schema_hash()
                 
-                st.success("Vanna AI training completed with updated schema!")
+                st.success("AI training completed!")
             except Exception as train_error:
                 print(f"Training error: {train_error}")
-                # Continue even if training fails - the model might still work
+                # Continue even if training fails
         
         return vn, None
         
@@ -443,8 +477,8 @@ if prompt := st.chat_input("Ask me something about the sales data..."):
                                     answer += f"The total for {numeric_cols[0]} is {total:,.2f}."
                         else:
                             answer = "No results were found for your query. The data might not contain information matching your request."
-                        
-                        # Display the main answer
+
+                        # Display answer
                         st.write(answer)
                         
                         # Display Vanna-generated chart if available
@@ -457,24 +491,37 @@ if prompt := st.chat_input("Ask me something about the sales data..."):
                         if not result_df.empty:
                             st.write("📊 **Results:**")
                             st.dataframe(result_df)
+
+                        # Display SQL in expander
+                        if sql_query:
+                            with st.expander("📝 View Generated SQL Query"):
+                                st.code(sql_query, language='sql')
+
+                        # ✅ Generate follow-up questions
+                        follow_up_questions = []
+                        if sql_query and not result_df.empty:
+                            follow_up_questions = vanna_agent.generate_followup_questions(prompt, sql_query, result_df)
+
+                        # ✅ Display follow-up questions as buttons (at the end)
+                        if follow_up_questions:
+                            st.markdown("**🤖 You could also ask:**")
+                            for q in follow_up_questions:
+                                st.markdown(f"- {q}")
+                                    
                         
                         # Store the response in chat history
                         message_data = {
                             "role": "assistant", 
                             "content": answer,
                             "sql_query": sql_query,
-                            "dataframe": result_df if not result_df.empty else pd.DataFrame()
+                            "dataframe": result_df if not result_df.empty else pd.DataFrame(),
+                            "follow_up_questions": follow_up_questions
                         }
                         
                         if chart_to_store:
                             message_data["vanna_chart"] = chart_to_store
                         
                         st.session_state.messages.append(message_data)
-                        
-                        # Display SQL in expander
-                        if sql_query:
-                            with st.expander("📝 View Generated SQL Query"):
-                                st.code(sql_query, language='sql')
                     
                     else:
                         error_message = "I couldn't generate a response for your question. Please try rephrasing your question or ask about sales data, products, customers, or time-based analysis."
@@ -483,6 +530,7 @@ if prompt := st.chat_input("Ask me something about the sales data..."):
 
                 except Exception as e:
                     # Check if this is a sensitive query that slipped through
+                    print(f"Error processing question: {e}")
                     if any(keyword in str(e).lower() for keyword in ['schema', 'table', 'sqlite_master']):
                         error_message = "I don't have access to that type of information. Please ask questions about your sales data instead."
                     else:
@@ -509,10 +557,6 @@ st.sidebar.info("""
 - What is the sales count and gross earning by region and status show its trend.
 - What is the gross margin of june?
 - Show me sales trends over time
-
-**Security Note:**
-- Database structure and schema information is protected
-- Only business data queries are allowed
 
 **Powered by:**
 - OpenAI GPT-4o
