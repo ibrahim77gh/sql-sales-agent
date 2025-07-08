@@ -10,6 +10,10 @@ import json
 import datetime
 import plotly.express as px
 import plotly.graph_objects as go
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 from utils import get_database_schema_hash, get_sample_training_data
 go.Figure.show = lambda *args, **kwargs: None
@@ -401,7 +405,8 @@ if prompt := st.chat_input("Ask me something about the sales data..."):
     
     # Check if agent setup was successful before attempting to use it
     elif agent_setup_error:
-        st.warning("Vanna AI agent is not available due to setup error.")
+        logger.error(f"Agent setup error: {agent_setup_error}")
+        st.warning(f"Vanna AI agent is not available due to setup error.{agent_setup_error}")
         error_msg = f"Agent is not available due to setup error: {agent_setup_error}"
         st.session_state.messages.append({"role": "assistant", "content": error_msg})
     elif vanna_agent:
