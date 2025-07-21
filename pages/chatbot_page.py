@@ -229,7 +229,8 @@ def setup_agent():
         # Initialize Vanna with OpenAI and ChromaDB
         vn = MyVanna(config={
             'api_key': openai_api_key,
-            'model': 'gpt-4o'  # Using the same model as before
+            'model': 'gpt-4o',  # Using the same model as before
+            'path': '/opt/sql-sales-agent/chroma.sqlite3'
         })
         
         # Connect to MSSQL database
