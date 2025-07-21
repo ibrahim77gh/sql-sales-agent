@@ -230,7 +230,7 @@ def setup_agent():
         vn = MyVanna(config={
             'api_key': openai_api_key,
             'model': 'gpt-4o',  # Using the same model as before
-            'path': '/opt/sql-sales-agent/chroma.sqlite3'
+            'path': '/opt/sql-sales-agent'
         })
         
         # Connect to MSSQL database
