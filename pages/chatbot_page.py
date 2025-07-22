@@ -2,7 +2,6 @@ import time
 import streamlit as st
 import os
 from dotenv import load_dotenv
-import sqlite3
 import pandas as pd
 from streamlit_cookies_controller import CookieController
 from dateutil.parser import parse as parse_datetime_string
@@ -10,21 +9,30 @@ import json
 import datetime
 import plotly.express as px
 import plotly.graph_objects as go
-import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 from utils import get_database_schema_hash, get_sample_training_data
 go.Figure.show = lambda *args, **kwargs: None
-import hashlib
 import re
 
 # Vanna AI imports
 from vanna.openai import OpenAI_Chat
 from vanna.chromadb import ChromaDB_VectorStore
+import logging
 
 load_dotenv()
+
+LOG_FILE = os.getenv("LOG_FILE_PATH", "app.log")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE, mode='a', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger(__name__)
 
 COOKIE_NAME = "login_state"
 SCHEMA_HASH_FILE = "schema_hash.txt"  # File to track schema changes
@@ -237,7 +245,7 @@ def setup_agent():
         
         # Check if we need to train or retrain the model
         training_data = vn.get_training_data()
-        print(f"Found {len(training_data)} training items in the vector database")
+        logger.info(f"Found {len(training_data)} training items in the vector database")
         needs_training = len(training_data) == 0 or schema_changed
         
         if needs_training:
@@ -297,32 +305,23 @@ def setup_agent():
                 - Use TOP N instead of LIMIT N
                 - Use square brackets [column_name] for column names with spaces
                 - Use proper MSSQL aggregate functions
-
-                DATABASE CONTENT:
-                - Main table: ConsolidateData_PBI
-                - Sales transactions with dates, amounts, profit
-                - Customer regions and company information
-                - Product categories and sales metrics
-                - All column names are cleaned (no leading/trailing spaces)
-
-                EXAMPLES OF CORRECT MSSQL SYNTAX:
-                - Monthly filter: WHERE YEAR([From_Date]) = 2025 AND MONTH([From_Date]) = 6
-                - Top results: SELECT TOP 10 * FROM ConsolidateData_PBI
-                - Current month: WHERE YEAR([From_Date]) = YEAR(GETDATE()) AND MONTH([From_Date]) = MONTH(GETDATE())
                 """)
-                
-                # Add specific MSSQL syntax examples
-                vn.train(question="How to filter by month in MSSQL?", 
-                        sql="SELECT * FROM ConsolidateData_PBI WHERE YEAR([From_Date]) = 2025 AND MONTH([From_Date]) = 6")
                 
                 vn.train(question="How to get current date in MSSQL?", 
                         sql="SELECT GETDATE() as current_date")
                 
-                vn.train(question="How to get top records in MSSQL?", 
-                        sql="SELECT TOP 10 * FROM ConsolidateData_PBI ORDER BY [Total Sales] DESC")
-                
                 # Train with sample question-SQL pairs
-                sample_data = get_sample_training_data()
+                # Select first available table as default (or apply a smarter heuristic)
+                if not df_tables.empty:
+                    target_table = df_tables['TABLE_NAME'].iloc[0]
+                    logger.info(f"Using table '{target_table}' for sample training data.")
+
+                    sample_data = get_sample_training_data(target_table)
+                    for item in sample_data:
+                        vn.train(question=item["question"], sql=item["sql"])
+                else:
+                    logger.warning("No tables found to generate sample training data.")
+
                 for item in sample_data:
                     vn.train(question=item["question"], sql=item["sql"])
                 
@@ -331,7 +330,7 @@ def setup_agent():
                 
                 st.success("AI training completed!")
             except Exception as train_error:
-                print(f"Training error: {train_error}")
+                logger.error(f"Training error: {train_error}")
                 # Continue even if training fails
         
         return vn, None
@@ -416,6 +415,7 @@ if prompt := st.chat_input("Ask me something about the sales data..."):
                     # Use Vanna AI's built-in ask method which handles everything
                     # This returns SQL, DataFrame, chart, and explanation
                     result = vanna_agent.ask(prompt)
+                    logger.info(f"Vanna AI response: {result}")
                     
                     # Vanna's ask method can return different types of results
                     # Let's handle them appropriately
@@ -423,13 +423,16 @@ if prompt := st.chat_input("Ask me something about the sales data..."):
                         # Try to get the SQL query that was generated
                         try:
                             sql_query = vanna_agent.generate_sql(prompt)
+                            logger.info(f"Generated SQL query: {sql_query}")
                         except:
                             sql_query = None
-                        
+                            logger.warning("Failed to generate SQL query.")
+
                         # Try to get the data
                         try:
                             if sql_query:
                                 result_df = vanna_agent.run_sql(sql_query)
+                                logger.info(f"Query result DataFrame: {result_df}")
                             else:
                                 result_df = pd.DataFrame()
                         except:
@@ -447,10 +450,11 @@ if prompt := st.chat_input("Ask me something about the sales data..."):
                                     ),
                                     df=result_df
                                 )
+                                logger.info("Generated Vanna chart successfully.")
                             else:
                                 vanna_chart = None
                         except Exception as chart_error:
-                            print(f"Chart generation error: {chart_error}")
+                            logger.error(f"Chart generation error: {chart_error}")
                             vanna_chart = None
                         
                         # Generate a natural language response
@@ -535,7 +539,7 @@ if prompt := st.chat_input("Ask me something about the sales data..."):
 
                 except Exception as e:
                     # Check if this is a sensitive query that slipped through
-                    print(f"Error processing question: {e}")
+                    logger.error(f"Error processing question: {e}")
                     if any(keyword in str(e).lower() for keyword in ['schema', 'table', 'sqlite_master']):
                         error_message = "I don't have access to that type of information. Please ask questions about your sales data instead."
                     else:

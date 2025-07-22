@@ -3,3 +3,4 @@
 /__pycache__/
 chroma.sqlite3
 /[0-9a-fA-F-]*/
+app.log

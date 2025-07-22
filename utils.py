@@ -64,63 +64,31 @@ def get_database_schema_hash():
         return None, str(e)
     
 
-def get_sample_training_data():
-    """Return sample training data for the model with MSSQL-specific syntax."""
+def get_sample_training_data(table_name, sales_column="Total Sales", date_column="From_Date", region_column="region_name", company_column="Company_Name", protection_column="Protection SALES"):
+    """Generate dynamic training data based on provided table and column names."""
     return [
         {
             "question": "What are the top 5 regions by total sales?",
-            "sql": "SELECT TOP 5 [region_name], SUM([Total Sales]) as total_sales FROM ConsolidateData_PBI GROUP BY [region_name] ORDER BY total_sales DESC"
+            "sql": f"SELECT TOP 5 [{region_column}], SUM([{sales_column}]) as total_sales FROM {table_name} GROUP BY [{region_column}] ORDER BY total_sales DESC"
         },
         {
             "question": "What are the top 5 companies by protection sales?",
-            "sql": "SELECT TOP 5 [Company_Name], SUM([Protection SALES]) as total_protection_sales FROM ConsolidateData_PBI GROUP BY [Company_Name] ORDER BY total_protection_sales DESC"
+            "sql": f"SELECT TOP 5 [{company_column}], SUM([{protection_column}]) as total_protection_sales FROM {table_name} GROUP BY [{company_column}] ORDER BY total_protection_sales DESC"
         },
         {
             "question": "Show sales trends by date and region",
-            "sql": "SELECT [From_Date], [region_name], SUM([Total Sales]) as total_sales FROM ConsolidateData_PBI GROUP BY [From_Date], [region_name] ORDER BY [From_Date]"
+            "sql": f"SELECT [{date_column}], [{region_column}], SUM([{sales_column}]) as total_sales FROM {table_name} GROUP BY [{date_column}], [{region_column}] ORDER BY [{date_column}]"
         },
         {
             "question": "Show sales data for June 2025",
-            "sql": "SELECT * FROM ConsolidateData_PBI WHERE YEAR([From_Date]) = 2025 AND MONTH([From_Date]) = 6"
-        },
-        {
-            "question": "What is the total sales for June 2025?",
-            "sql": "SELECT SUM([Total Sales]) as total_sales FROM ConsolidateData_PBI WHERE YEAR([From_Date]) = 2025 AND MONTH([From_Date]) = 6"
-        },
-        {
-            "question": "Get sales data for a specific month and year",
-            "sql": "SELECT * FROM ConsolidateData_PBI WHERE YEAR([From_Date]) = 2025 AND MONTH([From_Date]) = 12"
-        },
-        {
-            "question": "Show monthly sales totals for 2024",
-            "sql": "SELECT YEAR([From_Date]) as sales_year, MONTH([From_Date]) as sales_month, SUM([Total Sales]) as monthly_total FROM ConsolidateData_PBI WHERE YEAR([From_Date]) = 2024 GROUP BY YEAR([From_Date]), MONTH([From_Date]) ORDER BY sales_year, sales_month"
-        },
-        {
-            "question": "Show monthly sales totals for 2025",
-            "sql": "SELECT YEAR([From_Date]) as sales_year, MONTH([From_Date]) as sales_month, SUM([Total Sales]) as monthly_total FROM ConsolidateData_PBI WHERE YEAR([From_Date]) = 2025 GROUP BY YEAR([From_Date]), MONTH([From_Date]) ORDER BY sales_year, sales_month"
+            "sql": f"SELECT * FROM {table_name} WHERE YEAR([{date_column}]) = 2025 AND MONTH([{date_column}]) = 6"
         },
         {
             "question": "Get sales data for last 30 days",
-            "sql": "SELECT * FROM ConsolidateData_PBI WHERE [From_Date] >= DATEADD(day, -30, GETDATE())"
+            "sql": f"SELECT * FROM {table_name} WHERE [{date_column}] >= DATEADD(day, -30, GETDATE())"
         },
         {
             "question": "What are the sales for the current month?",
-            "sql": "SELECT SUM([Total Sales]) as current_month_sales FROM ConsolidateData_PBI WHERE YEAR([From_Date]) = YEAR(GETDATE()) AND MONTH([From_Date]) = MONTH(GETDATE())"
-        },
-        {
-            "question": "Show sales by month and year",
-            "sql": "SELECT YEAR([From_Date]) as year, MONTH([From_Date]) as month, SUM([Total Sales]) as monthly_sales FROM ConsolidateData_PBI GROUP BY YEAR([From_Date]), MONTH([From_Date]) ORDER BY year, month"
-        },
-        {
-            "question": "Get sales data between two dates",
-            "sql": "SELECT * FROM ConsolidateData_PBI WHERE [From_Date] BETWEEN '2025-01-01' AND '2025-06-30'"
-        },
-        {
-            "question": "What is the average sales per day?",
-            "sql": "SELECT AVG([Total Sales]) as avg_daily_sales FROM ConsolidateData_PBI"
-        },
-        {
-            "question": "Show total sales by quarter",
-            "sql": "SELECT YEAR([From_Date]) as year, DATEPART(quarter, [From_Date]) as quarter, SUM([Total Sales]) as quarterly_sales FROM ConsolidateData_PBI GROUP BY YEAR([From_Date]), DATEPART(quarter, [From_Date]) ORDER BY year, quarter"
+            "sql": f"SELECT SUM([{sales_column}]) as current_month_sales FROM {table_name} WHERE YEAR([{date_column}]) = YEAR(GETDATE()) AND MONTH([{date_column}]) = MONTH(GETDATE())"
         }
     ]
