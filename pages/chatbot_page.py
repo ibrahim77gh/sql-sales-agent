@@ -612,9 +612,15 @@ if vanna_agent and st.sidebar.button("🔄 Force Retrain Model"):
             """)
 
             # Retrain with sample data
-            sample_data = get_sample_training_data()
-            for item in sample_data:
-                vanna_agent.train(question=item["question"], sql=item["sql"])
+            if not df_tables.empty:
+                target_table = df_tables['TABLE_NAME'].iloc[0]
+                logger.info(f"Using table '{target_table}' for sample training data.")
+
+                sample_data = get_sample_training_data(target_table)
+                for item in sample_data:
+                    vanna_agent.train(question=item["question"], sql=item["sql"])
+            else:
+                logger.warning("No tables found to generate sample training data.")
 
             # Update schema hash
             save_schema_hash()
