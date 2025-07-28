@@ -10,7 +10,7 @@ import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 
-from utils import get_database_schema_hash, get_sample_training_data
+from utils import get_sample_training_data, has_schema_changed, save_schema_hash, train_vanna_dynamically
 go.Figure.show = lambda *args, **kwargs: None
 import re
 
@@ -35,19 +35,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 COOKIE_NAME = "login_state"
-SCHEMA_HASH_FILE = "schema_hash.txt"  # File to track schema changes
 
 # Sensitive keywords to block
 SENSITIVE_KEYWORDS = [
     'schema', 'table', 'column', 'database', 'structure', 'ddl', 'create table',
     'alter table', 'drop table', 'sqlite_master', 'pragma', 'table_info',
     'describe', 'show tables', 'show columns', 'information_schema',
-    # The `get_database_schema_hash` function is designed to generate a hash of the current database
-    # schema in order to detect any changes that may have occurred. Here is a breakdown of the steps
-    # it takes:
-    # The `get_database_schema_hash` function is designed to generate a hash of the current database
-    # schema in order to detect any changes that may have occurred. Here is a breakdown of how the
-    # function works:
     'sys.', 'metadata', 'system', 'admin', 'configuration', 'settings'
 ]
 
@@ -144,40 +137,6 @@ def check_cookie_login_and_expiry():
     return None
 
 
-def has_schema_changed():
-    """Check if the database schema has changed since last training."""
-    current_hash, error = get_database_schema_hash()  # Unpack here too
-    
-    if error or current_hash is None:
-        return True  # Assume changed if we can't get hash
-    
-    try:
-        if os.path.exists(SCHEMA_HASH_FILE):
-            with open(SCHEMA_HASH_FILE, 'r') as f:
-                stored_hash = f.read().strip()
-            return current_hash != stored_hash
-        else:
-            return True
-    except Exception:
-        return True
-
-
-def save_schema_hash():
-    """Save the current schema hash."""
-    current_hash, error = get_database_schema_hash()  # Unpack the tuple
-    
-    if error:
-        print(f"Error getting schema hash: {error}")
-        return
-        
-    if current_hash:
-        try:
-            with open(SCHEMA_HASH_FILE, 'w') as f:
-                f.write(current_hash)  # Now writing just the hash string
-        except Exception as e:
-            print(f"Error saving schema hash: {e}")
-
-
 def clear_vector_database(vn):
     """Clear all existing training data from the vector database."""
     try:
@@ -224,119 +183,41 @@ class MyVanna(ChromaDB_VectorStore, OpenAI_Chat):
 
 @st.cache_resource
 def setup_agent():
-    """Sets up the Vanna AI agent with MSSQL database."""
     try:
-        # Get OpenAI API key
         openai_api_key = os.getenv('OPENAI_API_KEY')
         if not openai_api_key:
             return None, "OPENAI_API_KEY environment variable not set."
-        
-        # Check if schema has changed
+
         schema_changed = has_schema_changed()
-        
-        # Initialize Vanna with OpenAI and ChromaDB
+
         vn = MyVanna(config={
             'api_key': openai_api_key,
-            'model': 'gpt-4o',  # Using the same model as before
+            'model': 'gpt-4o',
         })
-        
-        # Connect to MSSQL database
         vn.connect_to_mssql(odbc_conn_str=os.getenv('DB_URI_VANNA'))
-        
-        # Check if we need to train or retrain the model
+
         training_data = vn.get_training_data()
         logger.info(f"Found {len(training_data)} training items in the vector database")
         needs_training = len(training_data) == 0 or schema_changed
-        
+
         if needs_training:
             if schema_changed:
                 st.info("Database schema has changed. Clearing old training data and retraining Vanna AI...")
-                # Clear existing training data
                 clear_vector_database(vn)
             else:
-                st.info("Training Vanna AI on your database schema and sample queries... This may take a moment.")
-            
-            # Train Vanna on DDL statements
+                st.info("Training Vanna AI on your database schema using dynamic training plan...")
+
             try:
-                df_tables = vn.run_sql("""
-                    SELECT TABLE_NAME
-                    FROM INFORMATION_SCHEMA.TABLES
-                    WHERE TABLE_TYPE = 'BASE TABLE'
-                """)
-
-                # Get column definitions
-                df_columns = vn.run_sql("""
-                    SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE
-                    FROM INFORMATION_SCHEMA.COLUMNS
-                    ORDER BY TABLE_NAME, ORDINAL_POSITION
-                """)
-
-                # Create DDL from metadata
-                for table in df_tables['TABLE_NAME'].to_list():
-                    df_table_cols = df_columns[df_columns['TABLE_NAME'] == table]
-                    ddl = f"CREATE TABLE {table} (\n"
-                    ddl += ",\n".join([
-                        f"  {row['COLUMN_NAME']} {row['DATA_TYPE'].upper()}"
-                        + (" NULL" if row["IS_NULLABLE"] == "YES" else " NOT NULL")
-                        for _, row in df_table_cols.iterrows()
-                    ])
-                    ddl += "\n);"
-                    vn.train(ddl=ddl)
-                
-                # Add MSSQL-specific documentation
-                vn.train(documentation="""
-                This is a Microsoft SQL Server (MSSQL) sales database containing customer transaction data.
-
-                CRITICAL SYNTAX REQUIREMENTS:
-                - This is Microsoft SQL Server, NOT SQLite or any other database
-                - NEVER use SQLite functions like strftime(), datetime(), etc.
-                - Use MSSQL syntax exclusively
-
-                DATE FUNCTIONS (MSSQL ONLY):
-                - Use YEAR([column]) to extract year
-                - Use MONTH([column]) to extract month  
-                - Use DAY([column]) to extract day
-                - Use DATEPART(quarter, [column]) for quarters
-                - Use GETDATE() for current date/time
-                - Use DATEADD(interval, number, date) for date arithmetic
-                - Use BETWEEN for date ranges
-
-                QUERY SYNTAX:
-                - Use TOP N instead of LIMIT N
-                - Use square brackets [column_name] for column names with spaces
-                - Use proper MSSQL aggregate functions
-                """)
-                
-                vn.train(question="How to get current date in MSSQL?", 
-                        sql="SELECT GETDATE() as current_date")
-                
-                # Train with sample question-SQL pairs
-                # Select first available table as default (or apply a smarter heuristic)
-                if not df_tables.empty:
-                    target_table = df_tables['TABLE_NAME'].iloc[0]
-                    logger.info(f"Using table '{target_table}' for sample training data.")
-
-                    sample_data = get_sample_training_data(target_table)
-                    for item in sample_data:
-                        vn.train(question=item["question"], sql=item["sql"])
-                else:
-                    logger.warning("No tables found to generate sample training data.")
-
-                for item in sample_data:
-                    vn.train(question=item["question"], sql=item["sql"])
-                
-                # Save the current schema hash
-                save_schema_hash()
-                
+                train_vanna_dynamically(vn)
                 st.success("AI training completed!")
             except Exception as train_error:
                 logger.error(f"Training error: {train_error}")
-                # Continue even if training fails
-        
+
         return vn, None
-        
+
     except Exception as e:
         return None, f"Error setting up Vanna AI agent: {e}"
+
 
 # Initialize the Vanna agent
 vanna_agent, agent_setup_error = setup_agent()
@@ -577,58 +458,11 @@ st.sidebar.info("""
 if vanna_agent and st.sidebar.button("🔄 Force Retrain Model"):
     with st.spinner("Retraining Vanna AI..."):
         try:
-            # Clear existing training data
             clear_vector_database(vanna_agent)
-
-            # Fetch schema info from MSSQL
-            df_tables = vanna_agent.run_sql("""
-                SELECT TABLE_NAME
-                FROM INFORMATION_SCHEMA.TABLES
-                WHERE TABLE_TYPE = 'BASE TABLE'
-            """)
-            
-            df_columns = vanna_agent.run_sql("""
-                SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE
-                FROM INFORMATION_SCHEMA.COLUMNS
-                ORDER BY TABLE_NAME, ORDINAL_POSITION
-            """)
-
-            # Generate and train DDL statements
-            for table in df_tables['TABLE_NAME'].to_list():
-                df_table_cols = df_columns[df_columns['TABLE_NAME'] == table]
-                ddl = f"CREATE TABLE {table} (\n"
-                ddl += ",\n".join([
-                    f"  {row['COLUMN_NAME']} {row['DATA_TYPE'].upper()}"
-                    + (" NULL" if row["IS_NULLABLE"] == "YES" else " NOT NULL")
-                    for _, row in df_table_cols.iterrows()
-                ])
-                ddl += "\n);"
-                vanna_agent.train(ddl=ddl)
-
-            # Add business documentation
-            vanna_agent.train(documentation="""
-            This is a sales database containing customer transaction data with cleaned column names.
-            All column names have had leading/trailing whitespace removed for consistency.
-            """)
-
-            # Retrain with sample data
-            if not df_tables.empty:
-                target_table = df_tables['TABLE_NAME'].iloc[0]
-                logger.info(f"Using table '{target_table}' for sample training data.")
-
-                sample_data = get_sample_training_data(target_table)
-                for item in sample_data:
-                    vanna_agent.train(question=item["question"], sql=item["sql"])
-            else:
-                logger.warning("No tables found to generate sample training data.")
-
-            # Update schema hash
-            save_schema_hash()
-
+            train_vanna_dynamically(vanna_agent)
             st.sidebar.success("Model retrained successfully!")
         except Exception as e:
             st.sidebar.error(f"Retraining failed: {e}")
-
 
 # Show current training data count and schema status
 if vanna_agent:
