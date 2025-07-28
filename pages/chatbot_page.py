@@ -10,7 +10,7 @@ import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 
-from utils import get_sample_training_data, has_schema_changed, save_schema_hash, train_vanna_dynamically
+from utils import has_schema_changed, train_vanna_dynamically
 go.Figure.show = lambda *args, **kwargs: None
 import re
 
@@ -35,6 +35,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 COOKIE_NAME = "login_state"
+
+# Vanna AI Custom Class
+class MyVanna(ChromaDB_VectorStore, OpenAI_Chat):
+    def __init__(self, config=None):
+        ChromaDB_VectorStore.__init__(self, config=config)
+        OpenAI_Chat.__init__(self, config=config)
 
 # Sensitive keywords to block
 SENSITIVE_KEYWORDS = [
@@ -137,7 +143,7 @@ def check_cookie_login_and_expiry():
     return None
 
 
-def clear_vector_database(vn):
+def clear_vector_database(vn: MyVanna):
     """Clear all existing training data from the vector database."""
     try:
         # Get all training data
@@ -173,13 +179,6 @@ if logged_in_user_info is None:
     st.session_state.messages = [] # Clear chat history
     st.switch_page("streamlit_app.py") # Redirect to login page
     st.stop() # Stop execution of the rest of this page
-
-# Vanna AI Custom Class
-class MyVanna(ChromaDB_VectorStore, OpenAI_Chat):
-    def __init__(self, config=None):
-        ChromaDB_VectorStore.__init__(self, config=config)
-        OpenAI_Chat.__init__(self, config=config)
-
 
 @st.cache_resource
 def setup_agent():

@@ -3,32 +3,6 @@ import os
 import hashlib
 from sqlalchemy import text
 
-SYSTEM_PROMPT = """
-    You are an agent designed to interact with a SQL database.
-    Given an input question, create a syntactically correct {dialect} query to run,
-    then look at the results of the query and return the answer in a clear, user-friendly format.
-    Unless the user specifies a specific number of examples they wish to obtain, always limit your
-    query to at most {top_k} results.
-
-    You can order the results by a relevant column to return the most interesting
-    examples in the database. Never query for all the columns from a specific table,
-    only ask for the relevant columns given the question.
-
-    You MUST double check your query before executing it. If you get an error while
-    executing a query, rewrite the query and try again.
-
-    DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the
-    database.
-
-    To start you should ALWAYS look at the tables in the database to see what you
-    can query. Do NOT skip this step.
-
-    Then you should query the schema of the most relevant tables.
-
-    When presenting query results, summarize or format them nicely in your final response markdown.
-    Do not just output the raw query result string.
-    """
-
 def get_database_schema_hash():
     """Generate a hash of the current database schema to detect changes (MSSQL version)."""
     try:
@@ -162,18 +136,18 @@ def train_vanna_dynamically(vn, add_sample_data: bool = True):
     - Use proper MSSQL aggregate functions
     """)
 
-    # 4. Optional: Train with sample Q&A pairs
-    if add_sample_data:
-        df_tables = vn.run_sql("""
-            SELECT TABLE_NAME
-            FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_TYPE = 'BASE TABLE'
-        """)
-        if not df_tables.empty:
-            target_table = df_tables['TABLE_NAME'].iloc[0]
-            sample_data = get_sample_training_data(target_table)
-            for item in sample_data:
-                vn.train(question=item["question"], sql=item["sql"])
+    # # 4. Optional: Train with sample Q&A pairs
+    # if add_sample_data:
+    #     df_tables = vn.run_sql("""
+    #         SELECT TABLE_NAME
+    #         FROM INFORMATION_SCHEMA.TABLES
+    #         WHERE TABLE_TYPE = 'BASE TABLE'
+    #     """)
+    #     if not df_tables.empty:
+    #         target_table = df_tables['TABLE_NAME'].iloc[0]
+    #         sample_data = get_sample_training_data(target_table)
+    #         for item in sample_data:
+    #             vn.train(question=item["question"], sql=item["sql"])
 
     # 5. Save hash
     save_schema_hash()
